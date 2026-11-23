@@ -15,10 +15,10 @@ import type {
 } from './types/notebook';
 import {
   computeLatestContactIso,
-  getEffectiveApiKey,
+  getSavedAnalyzerMode,
   normalizePeople,
   safeStorage,
-  STORAGE_API_KEY,
+  saveAnalyzerMode,
   STORAGE_DATA_PREFIX,
   STORAGE_LANG_KEY,
   STORAGE_PENDING_PREFIX,
@@ -26,6 +26,10 @@ import {
   STORAGE_THEME_KEY,
   uid,
 } from './utils/storage';
+import {
+  shouldUseCloudAi,
+  type AnalyzerPreferenceMode,
+} from './utils/aiPolicy';
 import {
   detectDeviceLanguage,
   detectDeviceTheme,
@@ -51,12 +55,16 @@ import {
 import { createDefaultSampleState, DEMO_SAMPLE_TEXT } from './data/sampleData';
 import {
   deletePersonFromCloud,
+  getFreshIdToken,
   getUserDisplayLabel,
+  isAdminUser,
   isSyntheticLoginEmail,
   logoutFromFirebase,
   reloadFirebaseUser,
   savePersonToCloud,
+  setGlobalAiEnabledInCloud,
   subscribeAuthChanges,
+  subscribeGlobalAiConfig,
   subscribeUserPeople,
   syncPeopleMapToCloud,
   updateUserProfileInCloud,
@@ -66,7 +74,9 @@ import {
   analyzeTextWithGemini,
   askAdvisorWithGemini,
   buildDossierWithGemini,
+  fetchServerAiStatus,
   formatGeminiFallbackReason,
+  toggleAdminSharedAi,
 } from './services/gemini';
 import { AuthScreen } from './components/AuthScreen';
 import { Sidebar } from './components/Sidebar';
@@ -157,9 +167,13 @@ export default function App() {
   const [advisorAnswer, setAdvisorAnswer] = useState('');
   const [isAskingAdvisor, setIsAskingAdvisor] = useState(false);
 
-  const [activeEngine, setActiveEngine] = useState<'gemini' | 'local'>(() =>
-    getEffectiveApiKey() ? 'gemini' : 'local'
+  const [analyzerMode, setAnalyzerMode] = useState<AnalyzerPreferenceMode>(() =>
+    getSavedAnalyzerMode()
   );
+  const [sharedAiEnabled, setSharedAiEnabled] = useState<boolean>(true);
+  const [serverKeyConfigured, setServerKeyConfigured] = useState<boolean>(false);
+  const [isTogglingSharedAi, setIsTogglingSharedAi] = useState<boolean>(false);
+  const [activeEngine, setActiveEngine] = useState<'gemini' | 'local'>('local');
   const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>('local');
   const [pendingQueue, setPendingQueue] = useState<PendingSyncQueue>({
     upsertIds: [],
@@ -228,6 +242,54 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute('lang', lang);
   }, [lang]);
+
+  useEffect(() => {
+    let active = true;
+    fetchServerAiStatus().then((status) => {
+      if (!active) return;
+      setSharedAiEnabled(status.sharedAiEnabled);
+      setServerKeyConfigured(status.serverKeyConfigured);
+    });
+
+    let unsubGlobalAi: (() => void) | null = null;
+    try {
+      unsubGlobalAi = subscribeGlobalAiConfig(
+        (cfg) => {
+          if (!active) return;
+          setSharedAiEnabled(cfg.sharedAiEnabled);
+        },
+        () => {
+          // If appConfig isn't readable yet in RTDB rules, keep server status
+        }
+      );
+    } catch {
+      // Ignore Firebase initialization failure
+    }
+
+    return () => {
+      active = false;
+      unsubGlobalAi?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncEngineIndicator = () => {
+      const decision = shouldUseCloudAi({
+        preferenceMode: analyzerMode,
+        isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
+        sharedAiEnabled,
+        serverKeyConfigured,
+      });
+      setActiveEngine(decision.useCloud ? 'gemini' : 'local');
+    };
+    syncEngineIndicator();
+    window.addEventListener('online', syncEngineIndicator);
+    window.addEventListener('offline', syncEngineIndicator);
+    return () => {
+      window.removeEventListener('online', syncEngineIndicator);
+      window.removeEventListener('offline', syncEngineIndicator);
+    };
+  }, [analyzerMode, sharedAiEnabled, serverKeyConfigured]);
 
   const handleToggleTheme = useCallback(() => {
     setTheme((prev) => {
@@ -419,6 +481,38 @@ export default function App() {
     }
     return res;
   }, [currentUser]);
+
+  const handleToggleSharedAi = useCallback(
+    async (nextEnabled: boolean) => {
+      if (!currentUser || !isAdminUser(currentUser) || isTogglingSharedAi) return;
+      setIsTogglingSharedAi(true);
+      try {
+        const token = await getFreshIdToken(currentUser);
+        if (!token) {
+          throw new Error('NO_TOKEN');
+        }
+        await toggleAdminSharedAi(token, nextEnabled);
+        setSharedAiEnabled(nextEnabled);
+
+        try {
+          await setGlobalAiEnabledInCloud(currentUser, nextEnabled);
+          showToast(
+            nextEnabled
+              ? tRef.current.account.adminToggleSavedOn
+              : tRef.current.account.adminToggleSavedOff,
+            'success'
+          );
+        } catch {
+          showToast(tRef.current.account.adminToggleServerOnlyNote, 'warning');
+        }
+      } catch {
+        showToast(tRef.current.account.adminToggleError, 'error');
+      } finally {
+        setIsTogglingSharedAi(false);
+      }
+    },
+    [currentUser, isTogglingSharedAi, showToast]
+  );
 
   const handleDeleteAccount = useCallback(
     async (currentPassword: string) => {
@@ -744,19 +838,29 @@ export default function App() {
     let fallbackReason = '';
 
     try {
-      if (!navigator.onLine) {
-        throw new Error('OFFLINE');
-      }
-      if (!getEffectiveApiKey()) {
-        throw new Error('NO_API_KEY');
+      const policy = shouldUseCloudAi({
+        preferenceMode: analyzerMode,
+        isOnline: navigator.onLine,
+        sharedAiEnabled,
+        serverKeyConfigured,
+      });
+      if (!policy.useCloud) {
+        throw new Error(policy.reason || 'NO_API_KEY');
       }
       result = await analyzeTextWithGemini(activePerson, rawText, people);
       engineUsed = 'gemini';
     } catch (err) {
       engineUsed = 'local';
+      const errCode = err instanceof Error ? err.message : '';
+      if (errCode === 'AI_DISABLED_BY_ADMIN') {
+        setSharedAiEnabled(false);
+      }
       const reasonMsg = formatGeminiFallbackReason(err, lang);
-      // Show explicit fallback toast if user expected Gemini (had API key or hit network/timeout)
-      if (err instanceof Error && err.message !== 'NO_API_KEY') {
+      if (
+        errCode &&
+        errCode !== 'NO_API_KEY' &&
+        errCode !== 'LOCAL_ONLY_MODE'
+      ) {
         usedFallback = true;
         fallbackReason = reasonMsg;
         showToast(reasonMsg, 'warning');
@@ -963,15 +1067,25 @@ export default function App() {
     setAdvisorAnswer('');
 
     try {
-      if (!navigator.onLine || !getEffectiveApiKey()) {
-        throw new Error('NO_API_KEY');
+      const policy = shouldUseCloudAi({
+        preferenceMode: analyzerMode,
+        isOnline: navigator.onLine,
+        sharedAiEnabled,
+        serverKeyConfigured,
+      });
+      if (!policy.useCloud) {
+        throw new Error(policy.reason || 'NO_API_KEY');
       }
       const answer = await askAdvisorWithGemini(activePerson, q, lang);
       setActiveEngine('gemini');
       setAdvisorAnswer(answer);
     } catch (err) {
       setActiveEngine('local');
-      if (err instanceof Error && err.message !== 'NO_API_KEY') {
+      const errCode = err instanceof Error ? err.message : '';
+      if (errCode === 'AI_DISABLED_BY_ADMIN') {
+        setSharedAiEnabled(false);
+      }
+      if (errCode && errCode !== 'NO_API_KEY' && errCode !== 'LOCAL_ONLY_MODE') {
         showToast(formatGeminiFallbackReason(err, lang), 'warning');
       }
       setAdvisorAnswer(buildLocalAdvisorAnswer(activePerson, q, lang));
@@ -990,14 +1104,24 @@ export default function App() {
     let engineUsed: 'gemini' | 'local' = 'gemini';
 
     try {
-      if (!navigator.onLine || !getEffectiveApiKey()) {
-        throw new Error('NO_API_KEY');
+      const policy = shouldUseCloudAi({
+        preferenceMode: analyzerMode,
+        isOnline: navigator.onLine,
+        sharedAiEnabled,
+        serverKeyConfigured,
+      });
+      if (!policy.useCloud) {
+        throw new Error(policy.reason || 'NO_API_KEY');
       }
       data = await buildDossierWithGemini(mode, activePerson, people, lang);
       engineUsed = 'gemini';
     } catch (err) {
       engineUsed = 'local';
-      if (err instanceof Error && err.message !== 'NO_API_KEY') {
+      const errCode = err instanceof Error ? err.message : '';
+      if (errCode === 'AI_DISABLED_BY_ADMIN') {
+        setSharedAiEnabled(false);
+      }
+      if (errCode && errCode !== 'NO_API_KEY' && errCode !== 'LOCAL_ONLY_MODE') {
         showToast(formatGeminiFallbackReason(err, lang), 'warning');
       }
       data = buildDossierLocally(mode, activePerson, people);
@@ -1565,6 +1689,11 @@ export default function App() {
             authRevision={authRevision}
             pendingCount={pendingCount}
             isSyncing={isSyncing}
+            isAdmin={isAdminUser(currentUser)}
+            sharedAiEnabled={sharedAiEnabled}
+            serverKeyConfigured={serverKeyConfigured}
+            isTogglingSharedAi={isTogglingSharedAi}
+            onToggleSharedAi={handleToggleSharedAi}
             onClose={() => setAccountOpen(false)}
             onRefreshAccount={handleRefreshAccountStatus}
             onManualSync={handleManualSync}
@@ -1622,24 +1751,18 @@ export default function App() {
 
           <ApiSettingsModal
             open={apiSettingsOpen}
-            currentKey={safeStorage.getItem(STORAGE_API_KEY) || ''}
+            mode={analyzerMode}
+            sharedAiEnabled={sharedAiEnabled}
+            serverKeyConfigured={serverKeyConfigured}
             onClose={() => setApiSettingsOpen(false)}
-            onSaveKey={(val) => {
-              if (val) {
-                safeStorage.setItem(STORAGE_API_KEY, val);
-                setActiveEngine('gemini');
-                showToast(t.toasts.apiSaved, 'success');
-              } else {
-                safeStorage.removeItem(STORAGE_API_KEY);
-                setActiveEngine('local');
-                showToast(t.toasts.apiCleared, 'info');
-              }
+            onSaveMode={(nextMode) => {
+              setAnalyzerMode(nextMode);
+              saveAnalyzerMode(nextMode);
+              showToast(
+                nextMode === 'local' ? t.toasts.modeSavedLocal : t.toasts.modeSavedAuto,
+                'success'
+              );
               setApiSettingsOpen(false);
-            }}
-            onClearKey={() => {
-              safeStorage.removeItem(STORAGE_API_KEY);
-              setActiveEngine('local');
-              showToast(t.toasts.userKeyCleared, 'info');
             }}
           />
 

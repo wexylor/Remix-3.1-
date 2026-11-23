@@ -12,9 +12,13 @@ import {
   Trash2,
   Download,
   ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  Cpu,
   Eye,
   EyeOff,
 } from 'lucide-react';
+import type { AnalyzerPreferenceMode } from '../utils/aiPolicy';
 import type { DossierData, MeetingType } from '../types/notebook';
 import { AVATAR_COLORS, DEFAULT_GROUPS } from '../data/sampleData';
 import {
@@ -171,6 +175,11 @@ interface AccountModalProps {
   onManualSync: () => void;
   onLogout: () => void;
   onRequestDeleteAccount?: () => void;
+  isAdmin?: boolean;
+  sharedAiEnabled?: boolean;
+  serverKeyConfigured?: boolean;
+  isTogglingSharedAi?: boolean;
+  onToggleSharedAi?: (enabled: boolean) => void;
   onToast: (message: string, type: 'info' | 'success' | 'warning' | 'error') => void;
 }
 
@@ -185,6 +194,11 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   onManualSync,
   onLogout,
   onRequestDeleteAccount,
+  isAdmin = false,
+  sharedAiEnabled = true,
+  serverKeyConfigured = false,
+  isTogglingSharedAi = false,
+  onToggleSharedAi,
   onToast,
 }) => {
   const { lang, setLang, t } = useI18n();
@@ -563,6 +577,79 @@ export const AccountModal: React.FC<AccountModalProps> = ({
         <div className="space-y-3">
           <p className="text-[13px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
             {t.account.localModeDesc}
+          </p>
+        </div>
+      )}
+
+      {user && isAdmin && onToggleSharedAi && (
+        <div
+          className="mt-4 p-3.5 rounded-lg border space-y-2.5"
+          style={{
+            backgroundColor: 'var(--bg-elevated)',
+            borderColor: sharedAiEnabled ? 'var(--success-border)' : 'var(--border-color)',
+          }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold">
+              <ShieldCheck
+                className="w-4 h-4 shrink-0"
+                style={{ color: sharedAiEnabled ? 'var(--success-text)' : 'var(--text-secondary)' }}
+              />
+              <span>{t.account.adminTitle}</span>
+            </div>
+            <span
+              className="px-2 py-0.5 rounded text-[11px] font-medium border"
+              style={{
+                backgroundColor: 'var(--bg-surface)',
+                borderColor: 'var(--border-color)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              {t.account.adminBadge}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 pt-0.5">
+            <div className="min-w-0">
+              <div className="text-[13px] font-medium">{t.account.adminSharedAiLabel}</div>
+              <div className="text-[11.5px] mt-0.5" style={{ color: serverKeyConfigured ? 'var(--success-text)' : 'var(--warning-text)' }}>
+                {serverKeyConfigured ? t.account.adminServerKeyReady : t.account.adminServerKeyMissing}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={sharedAiEnabled}
+              aria-label={t.account.adminSharedAiLabel}
+              disabled={isTogglingSharedAi}
+              onClick={() => onToggleSharedAi(!sharedAiEnabled)}
+              className="inline-flex items-center gap-2 shrink-0 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors disabled:opacity-60"
+              style={{
+                backgroundColor: sharedAiEnabled ? 'var(--success-bg)' : 'var(--bg-surface)',
+                borderColor: sharedAiEnabled ? 'var(--success-border)' : 'var(--border-color)',
+                color: sharedAiEnabled ? 'var(--success-text)' : 'var(--text-secondary)',
+              }}
+            >
+              <span
+                aria-hidden="true"
+                className="relative inline-flex h-4 w-7 items-center rounded-full transition-colors"
+                style={{
+                  backgroundColor: sharedAiEnabled ? 'var(--success-text)' : 'var(--text-muted)',
+                }}
+              >
+                <span
+                  className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                    sharedAiEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </span>
+              <span>{sharedAiEnabled ? t.account.adminSharedAiOn : t.account.adminSharedAiOff}</span>
+            </button>
+          </div>
+
+          <p className="text-[11.5px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+            {t.account.adminSharedAiDesc}
           </p>
         </div>
       )}
@@ -1533,29 +1620,40 @@ export const AddMeetingModal: React.FC<AddMeetingModalProps> = ({
 };
 
 /* ============================================================================
-   5. API SETTINGS MODAL
+   5. ANALYZER SETTINGS MODAL
    ============================================================================ */
 interface ApiSettingsModalProps {
   open: boolean;
-  currentKey: string;
+  mode: AnalyzerPreferenceMode;
+  sharedAiEnabled: boolean;
+  serverKeyConfigured: boolean;
   onClose: () => void;
-  onSaveKey: (val: string) => void;
-  onClearKey: () => void;
+  onSaveMode: (mode: AnalyzerPreferenceMode) => void;
 }
 
 export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   open,
-  currentKey,
+  mode,
+  sharedAiEnabled,
+  serverKeyConfigured,
   onClose,
-  onSaveKey,
-  onClearKey,
+  onSaveMode,
 }) => {
   const { t } = useI18n();
-  const [val, setVal] = useState(currentKey);
+  const [selectedMode, setSelectedMode] = useState<AnalyzerPreferenceMode>(mode);
 
   useEffect(() => {
-    if (open) setVal(currentKey);
-  }, [open, currentKey]);
+    if (open) setSelectedMode(mode);
+  }, [open, mode]);
+
+  const statusText = !sharedAiEnabled
+    ? t.modals.analyzerStatusDisabled
+    : serverKeyConfigured
+    ? t.modals.analyzerStatusReady
+    : t.modals.analyzerStatusNoKey;
+
+  const statusColor =
+    sharedAiEnabled && serverKeyConfigured ? 'var(--success-text)' : 'var(--warning-text)';
 
   return (
     <ModalWrapper open={open} onClose={onClose} title={t.modals.apiTitle}>
@@ -1563,46 +1661,85 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
         {t.modals.apiDesc}
       </p>
 
-      <div className="mb-4">
-        <label
-          htmlFor="apiKeyInput"
-          className="block text-xs font-medium mb-1.5"
-          style={{ color: 'var(--text-secondary)' }}
-        >
-          {t.modals.apiKeyLabel}
-        </label>
-        <input
-          id="apiKeyInput"
-          type="password"
-          value={val}
-          onChange={(e) => setVal(e.target.value)}
-          placeholder="AIzaSy..."
-          className="w-full px-3 py-2 rounded-md border text-sm font-mono outline-none"
-          style={{
-            backgroundColor: 'var(--bg-input)',
-            borderColor: 'var(--border-color)',
-          }}
-        />
+      <div
+        className="mb-4 px-3 py-2.5 rounded-lg border flex items-center justify-between gap-3 text-xs"
+        style={{
+          backgroundColor: 'var(--bg-input)',
+          borderColor: 'var(--border-color)',
+        }}
+      >
+        <span style={{ color: 'var(--text-secondary)' }}>{t.modals.analyzerStatusLabel}</span>
+        <span className="font-medium text-right" style={{ color: statusColor }}>
+          {statusText}
+        </span>
+      </div>
+
+      <div className="mb-4 space-y-2">
+        <div className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
+          {t.modals.analyzerModeLabel}
+        </div>
+        <div role="radiogroup" aria-label={t.modals.analyzerModeLabel} className="space-y-2">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={selectedMode === 'auto'}
+            onClick={() => setSelectedMode('auto')}
+            className="w-full text-left p-3 rounded-lg border transition-colors"
+            style={{
+              backgroundColor:
+                selectedMode === 'auto' ? 'var(--bg-elevated)' : 'var(--bg-input)',
+              borderColor:
+                selectedMode === 'auto' ? 'var(--border-hover)' : 'var(--border-color)',
+            }}
+          >
+            <div className="flex items-center gap-2 text-[13px] font-medium">
+              <Sparkles className="w-4 h-4 shrink-0" />
+              <span>{t.modals.analyzerModeAuto}</span>
+            </div>
+            <p className="text-[11.5px] mt-1 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              {t.modals.analyzerModeAutoDesc}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            role="radio"
+            aria-checked={selectedMode === 'local'}
+            onClick={() => setSelectedMode('local')}
+            className="w-full text-left p-3 rounded-lg border transition-colors"
+            style={{
+              backgroundColor:
+                selectedMode === 'local' ? 'var(--bg-elevated)' : 'var(--bg-input)',
+              borderColor:
+                selectedMode === 'local' ? 'var(--border-hover)' : 'var(--border-color)',
+            }}
+          >
+            <div className="flex items-center gap-2 text-[13px] font-medium">
+              <Cpu className="w-4 h-4 shrink-0" />
+              <span>{t.modals.analyzerModeLocal}</span>
+            </div>
+            <p className="text-[11.5px] mt-1 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              {t.modals.analyzerModeLocalDesc}
+            </p>
+          </button>
+        </div>
       </div>
 
       <div className="flex justify-end gap-2">
         <button
           type="button"
-          onClick={() => {
-            setVal('');
-            onClearKey();
-          }}
+          onClick={onClose}
           className="px-3.5 py-2 rounded-md border text-[13px] font-medium hover:bg-[var(--bg-hover)]"
           style={{
             backgroundColor: 'var(--bg-surface)',
             borderColor: 'var(--border-color)',
           }}
         >
-          {t.common.clear}
+          {t.common.cancel}
         </button>
         <button
           type="button"
-          onClick={() => onSaveKey(val.trim())}
+          onClick={() => onSaveMode(selectedMode)}
           className="px-4 py-2 rounded-md text-[13px] font-medium hover:opacity-90"
           style={{
             backgroundColor: 'var(--btn-primary-bg)',

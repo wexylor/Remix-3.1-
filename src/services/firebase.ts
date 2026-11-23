@@ -30,6 +30,12 @@ import {
 } from '@firebase/database';
 import type { Person } from '../types/notebook';
 import { normalizePeople } from '../utils/storage';
+import {
+  ADMIN_UID,
+  isAdminUid,
+  parseGlobalAiConfig,
+  type GlobalAiConfig,
+} from '../utils/aiPolicy';
 
 export const firebaseConfig = {
   apiKey: 'AIzaSyCZzb83vFUDEruoR4KMFBG-7CVnyBwkRDc',
@@ -338,4 +344,50 @@ export function subscribeUserPeople(
       onError(err);
     }
   );
+}
+
+export function isAdminUser(user: User | null): boolean {
+  return Boolean(user && isAdminUid(user.uid, ADMIN_UID));
+}
+
+export async function getFreshIdToken(user: User | null): Promise<string | null> {
+  if (!user) return null;
+  try {
+    return await user.getIdToken();
+  } catch {
+    return null;
+  }
+}
+
+export function subscribeGlobalAiConfig(
+  onData: (config: GlobalAiConfig) => void,
+  onError?: (err: Error) => void
+): Unsubscribe {
+  const { db } = getFirebaseServices();
+  const cfgRef = ref(db, 'appConfig/aiSettings');
+  return onValue(
+    cfgRef,
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        onData({ sharedAiEnabled: true });
+        return;
+      }
+      onData(parseGlobalAiConfig(snapshot.val()));
+    },
+    (err) => {
+      onError?.(err);
+    }
+  );
+}
+
+export async function setGlobalAiEnabledInCloud(
+  user: User,
+  sharedAiEnabled: boolean
+): Promise<void> {
+  const { db } = getFirebaseServices();
+  await set(ref(db, 'appConfig/aiSettings'), {
+    sharedAiEnabled,
+    updatedAt: new Date().toISOString(),
+    updatedBy: user.uid,
+  });
 }
